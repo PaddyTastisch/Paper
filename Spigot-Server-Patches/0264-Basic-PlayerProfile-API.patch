@@ -1,4 +1,4 @@
-From 74a4f8f8bc5372001810864ed4de7806010669bd Mon Sep 17 00:00:00 2001
+From 4aee03e51c30f5e8af99cb3c741608dbc08d3052 Mon Sep 17 00:00:00 2001
 From: Aikar <aikar@aikar.co>
 Date: Mon, 15 Jan 2018 22:11:48 -0500
 Subject: [PATCH] Basic PlayerProfile API
@@ -6,10 +6,10 @@ Subject: [PATCH] Basic PlayerProfile API
 
 diff --git a/src/main/java/com/destroystokyo/paper/profile/CraftGameProfile.java b/src/main/java/com/destroystokyo/paper/profile/CraftGameProfile.java
 new file mode 100644
-index 000000000..7c3c89c83
+index 000000000..95c660071
 --- /dev/null
 +++ b/src/main/java/com/destroystokyo/paper/profile/CraftGameProfile.java
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,102 @@
 +package com.destroystokyo.paper.profile;
 +
 +import com.mojang.authlib.GameProfile;
@@ -25,7 +25,7 @@ index 000000000..7c3c89c83
 +
 +public class CraftGameProfile implements PlayerProfile {
 +
-+    private GameProfile profile;
++    private final GameProfile profile;
 +
 +    /**
 +     * Constructs a new Game Profile with the specified ID and name.
@@ -38,6 +38,9 @@ index 000000000..7c3c89c83
 +     */
 +    public CraftGameProfile(UUID id, String name) {
 +        this.profile = new GameProfile(id, name);
++        if (id == null && name == null) {
++            throw new NullPointerException("Both id and name may not be null");
++        }
 +    }
 +
 +    public GameProfile getGameProfile() {

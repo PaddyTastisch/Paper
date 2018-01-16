@@ -1,4 +1,4 @@
-From 6d38632790caddf5f4dec1cfdd35d01b3fc3bd6c Mon Sep 17 00:00:00 2001
+From c3b2e40be1b1bc234bffe5c5b9dfff821543d910 Mon Sep 17 00:00:00 2001
 From: Aikar <aikar@aikar.co>
 Date: Mon, 15 Jan 2018 21:46:46 -0500
 Subject: [PATCH] Basic PlayerProfile interface
@@ -79,38 +79,56 @@ index 00000000..5c92bbcb
 +}
 diff --git a/src/main/java/com/destroystokyo/paper/profile/ProfileProperty.java b/src/main/java/com/destroystokyo/paper/profile/ProfileProperty.java
 new file mode 100644
-index 00000000..367a75d6
+index 00000000..fe068f10
 --- /dev/null
 +++ b/src/main/java/com/destroystokyo/paper/profile/ProfileProperty.java
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,65 @@
 +package com.destroystokyo.paper.profile;
 +
++import com.google.common.base.Preconditions;
++
++import javax.annotation.Nonnull;
++import javax.annotation.Nullable;
 +import java.util.Objects;
 +
++/**
++ * Represents a property on a {@link PlayerProfile}
++ */
 +public class ProfileProperty {
 +    private final String name;
 +    private final String value;
 +    private final String signature;
 +
-+    public ProfileProperty(String name, String value) {
-+        this.name = name;
-+        this.value = value;
++    public ProfileProperty(@Nonnull String name, @Nonnull String value) {
++        this.name = Preconditions.checkNotNull(name, "ProfileProperty name can not be null");
++        this.value = Preconditions.checkNotNull(value, "ProfileProperty value can not be null");
 +        this.signature = null;
 +    }
-+    public ProfileProperty(String name, String value, String signature) {
-+        this.name = name;
-+        this.value = value;
++
++    public ProfileProperty(@Nonnull String name, @Nonnull String value, @Nullable String signature) {
++        this.name = Preconditions.checkNotNull(name, "ProfileProperty name can not be null");
++        this.value = Preconditions.checkNotNull(value, "ProfileProperty value can not be null");
 +        this.signature = signature;
 +    }
 +
-+    public String getName() {
++
++    /**
++     * @return The property name, ie "textures"
++     */
++    public @Nonnull String getName() {
 +        return name;
 +    }
 +
-+    public String getValue() {
++    /**
++     * @return The property value, likely to be base64 encoded
++     */
++    public @Nonnull String getValue() {
 +        return value;
 +    }
 +
++    /**
++     * @return A signature from Mojang for signed properties
++     */
 +    public String getSignature() {
 +        return signature;
 +    }
@@ -131,7 +149,7 @@ index 00000000..367a75d6
 +    }
 +}
 diff --git a/src/main/java/org/bukkit/Bukkit.java b/src/main/java/org/bukkit/Bukkit.java
-index ed403c33..af79872a 100644
+index ed403c33..ab4e1d13 100644
 --- a/src/main/java/org/bukkit/Bukkit.java
 +++ b/src/main/java/org/bukkit/Bukkit.java
 @@ -44,6 +44,8 @@ import org.bukkit.generator.ChunkGenerator;
@@ -149,20 +167,20 @@ index ed403c33..af79872a 100644
      }
 +
 +    /**
-+     * Creates a PlayerProfile for the specified name/uuid
++     * Creates a PlayerProfile for the specified uuid, with name as null
 +     * @param uuid UUID to create profile for
 +     * @return A PlayerProfile object
 +     */
-+    public static com.destroystokyo.paper.profile.PlayerProfile createProfile(UUID uuid) {
++    public static com.destroystokyo.paper.profile.PlayerProfile createProfile(@Nullable UUID uuid) {
 +        return server.createProfile(uuid);
 +    }
 +
 +    /**
-+     * Creates a PlayerProfile for the specified name/uuid
++     * Creates a PlayerProfile for the specified name, with UUID as null
 +     * @param name Name to create profile for
 +     * @return A PlayerProfile object
 +     */
-+    public static com.destroystokyo.paper.profile.PlayerProfile createProfile(String name) {
++    public static com.destroystokyo.paper.profile.PlayerProfile createProfile(@Nullable String name) {
 +        return server.createProfile(name);
 +    }
 +
@@ -172,14 +190,14 @@ index ed403c33..af79872a 100644
 +     * @param name Name to create profile for
 +     * @return A PlayerProfile object
 +     */
-+    public static com.destroystokyo.paper.profile.PlayerProfile createProfile(UUID uuid, String name) {
++    public static com.destroystokyo.paper.profile.PlayerProfile createProfile(@Nullable UUID uuid, @Nullable String name) {
 +        return server.createProfile(uuid, name);
 +    }
      // Paper end
  
      public static Server.Spigot spigot()
 diff --git a/src/main/java/org/bukkit/Server.java b/src/main/java/org/bukkit/Server.java
-index 87ab9d2b..57eb0d90 100644
+index 87ab9d2b..cd5dbe46 100644
 --- a/src/main/java/org/bukkit/Server.java
 +++ b/src/main/java/org/bukkit/Server.java
 @@ -45,6 +45,8 @@ import org.bukkit.generator.ChunkGenerator;
@@ -197,18 +215,18 @@ index 87ab9d2b..57eb0d90 100644
      boolean suggestPlayerNamesWhenNullTabCompletions();
 +
 +    /**
-+     * Creates a PlayerProfile for the specified name/uuid
++     * Creates a PlayerProfile for the specified uuid, with name as null
 +     * @param uuid UUID to create profile for
 +     * @return A PlayerProfile object
 +     */
-+    com.destroystokyo.paper.profile.PlayerProfile createProfile(UUID uuid);
++    com.destroystokyo.paper.profile.PlayerProfile createProfile(@Nullable UUID uuid);
 +
 +    /**
-+     * Creates a PlayerProfile for the specified name/uuid
++     * Creates a PlayerProfile for the specified name, with UUID as null
 +     * @param name Name to create profile for
 +     * @return A PlayerProfile object
 +     */
-+    com.destroystokyo.paper.profile.PlayerProfile createProfile(String name);
++    com.destroystokyo.paper.profile.PlayerProfile createProfile(@Nullable String name);
 +
 +    /**
 +     * Creates a PlayerProfile for the specified name/uuid
@@ -216,7 +234,7 @@ index 87ab9d2b..57eb0d90 100644
 +     * @param name Name to create profile for
 +     * @return A PlayerProfile object
 +     */
-+    com.destroystokyo.paper.profile.PlayerProfile createProfile(UUID uuid, String name);
++    com.destroystokyo.paper.profile.PlayerProfile createProfile(@Nullable UUID uuid, @Nullable String name);
      // Paper end
  }
 -- 
