@@ -1,4 +1,4 @@
-From afc7d0cfc8cd0a9f80be08773b4ba53aa5751a82 Mon Sep 17 00:00:00 2001
+From ba85d9bee8a09e4bf5c255f1081132222ab631f6 Mon Sep 17 00:00:00 2001
 From: Aikar <aikar@aikar.co>
 Date: Mon, 15 Jan 2018 21:46:46 -0500
 Subject: [PATCH] Basic PlayerProfile interface
@@ -152,19 +152,20 @@ index 00000000..82e7ea1d
 +    }
 +}
 diff --git a/src/main/java/org/bukkit/Bukkit.java b/src/main/java/org/bukkit/Bukkit.java
-index ed403c33..ab4e1d13 100644
+index ed403c33..690d9c07 100644
 --- a/src/main/java/org/bukkit/Bukkit.java
 +++ b/src/main/java/org/bukkit/Bukkit.java
-@@ -44,6 +44,8 @@ import org.bukkit.generator.ChunkGenerator;
+@@ -44,6 +44,9 @@ import org.bukkit.generator.ChunkGenerator;
  import org.bukkit.inventory.ItemFactory;
  import org.bukkit.inventory.meta.ItemMeta;
  
-+import javax.annotation.Nullable;
++import javax.annotation.Nullable; // Paper
++import javax.annotation.Nonnull; // Paper
 +
  /**
   * Represents the Bukkit core, for version and Server singleton handling
   */
-@@ -1216,6 +1218,34 @@ public final class Bukkit {
+@@ -1216,6 +1219,37 @@ public final class Bukkit {
      public static boolean suggestPlayerNamesWhenNullTabCompletions() {
          return server.suggestPlayerNamesWhenNullTabCompletions();
      }
@@ -174,7 +175,7 @@ index ed403c33..ab4e1d13 100644
 +     * @param uuid UUID to create profile for
 +     * @return A PlayerProfile object
 +     */
-+    public static com.destroystokyo.paper.profile.PlayerProfile createProfile(@Nullable UUID uuid) {
++    public static com.destroystokyo.paper.profile.PlayerProfile createProfile(@Nonnull UUID uuid) {
 +        return server.createProfile(uuid);
 +    }
 +
@@ -183,12 +184,15 @@ index ed403c33..ab4e1d13 100644
 +     * @param name Name to create profile for
 +     * @return A PlayerProfile object
 +     */
-+    public static com.destroystokyo.paper.profile.PlayerProfile createProfile(@Nullable String name) {
++    public static com.destroystokyo.paper.profile.PlayerProfile createProfile(@Nonnull String name) {
 +        return server.createProfile(name);
 +    }
 +
 +    /**
 +     * Creates a PlayerProfile for the specified name/uuid
++     *
++     * Both UUID and Name can not be null at same time. One must be supplied.
++     *
 +     * @param uuid UUID to create profile for
 +     * @param name Name to create profile for
 +     * @return A PlayerProfile object
@@ -200,19 +204,20 @@ index ed403c33..ab4e1d13 100644
  
      public static Server.Spigot spigot()
 diff --git a/src/main/java/org/bukkit/Server.java b/src/main/java/org/bukkit/Server.java
-index 87ab9d2b..cd5dbe46 100644
+index 87ab9d2b..f2ee6516 100644
 --- a/src/main/java/org/bukkit/Server.java
 +++ b/src/main/java/org/bukkit/Server.java
-@@ -45,6 +45,8 @@ import org.bukkit.generator.ChunkGenerator;
+@@ -45,6 +45,9 @@ import org.bukkit.generator.ChunkGenerator;
  import org.bukkit.inventory.ItemFactory;
  import org.bukkit.inventory.meta.ItemMeta;
  
-+import javax.annotation.Nullable;
++import javax.annotation.Nullable; // Paper
++import javax.annotation.Nonnull; // Paper
 +
  /**
   * Represents a server implementation.
   */
-@@ -1041,5 +1043,27 @@ public interface Server extends PluginMessageRecipient {
+@@ -1041,5 +1044,30 @@ public interface Server extends PluginMessageRecipient {
       * @return true if player names should be suggested
       */
      boolean suggestPlayerNamesWhenNullTabCompletions();
@@ -222,17 +227,20 @@ index 87ab9d2b..cd5dbe46 100644
 +     * @param uuid UUID to create profile for
 +     * @return A PlayerProfile object
 +     */
-+    com.destroystokyo.paper.profile.PlayerProfile createProfile(@Nullable UUID uuid);
++    com.destroystokyo.paper.profile.PlayerProfile createProfile(@Nonnull UUID uuid);
 +
 +    /**
 +     * Creates a PlayerProfile for the specified name, with UUID as null
 +     * @param name Name to create profile for
 +     * @return A PlayerProfile object
 +     */
-+    com.destroystokyo.paper.profile.PlayerProfile createProfile(@Nullable String name);
++    com.destroystokyo.paper.profile.PlayerProfile createProfile(@Nonnull String name);
 +
 +    /**
 +     * Creates a PlayerProfile for the specified name/uuid
++     *
++     * Both UUID and Name can not be null at same time. One must be supplied.
++     *
 +     * @param uuid UUID to create profile for
 +     * @param name Name to create profile for
 +     * @return A PlayerProfile object
