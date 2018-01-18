@@ -1,0 +1,428 @@
+From 35c91c6292f992e248056b09e36c118afd5c3ec9 Mon Sep 17 00:00:00 2001
+From: Aikar <aikar@aikar.co>
+Date: Thu, 18 Jan 2018 00:54:23 -0500
+Subject: [PATCH] Optimize Hoppers with Plugin Heuristics
+
+Use Heuristics on plugin behavior to detect potential intent of plugins using InventoryMoveItemEvent.
+
+Mode 2:
+If the plugin appears to only be checking the source/target inventory, IE to determine protection
+concepts to cancel the event, then we can greatly reduce the number of event fires for IMIE
+by only firing IMIE on the first event item attempted to be moved by a hopper.
+
+Because the plugin doesn't access the item, then there is no reason to fire the event again
+as the results should continue to be the same.
+
+The only risk here is if the plugin was maintaining its own state and conditionally changed cancel behavior
+based on that state, which is extremely unlikely.
+
+Mode 3:
+If no plugins are listening, we can go to an even more cleaner code path with no event fires.
+This also will let server owners ignore plugins listening to it if they dont wish to let a
+plugin ever cancel a hopper move.
+
+Mode 0:
+Standard CraftBukkit processing, however we have now made great optimizations to this code
+so even mode 0 should be significantly faster than Spigot.
+
+Mode 1: Auto detects if mode 2 or 3 is safe, else falls back to 0.
+
+diff --git a/src/main/java/com/destroystokyo/paper/PaperWorldConfig.java b/src/main/java/com/destroystokyo/paper/PaperWorldConfig.java
+index 11e88663e..f80d5c705 100644
+--- a/src/main/java/com/destroystokyo/paper/PaperWorldConfig.java
++++ b/src/main/java/com/destroystokyo/paper/PaperWorldConfig.java
+@@ -476,4 +476,24 @@ public class PaperWorldConfig {
+         squidMaxSpawnHeight = getDouble("squid-spawn-height.maximum", 0.0D);
+     }
+ 
++    public static final int OPT_HOPPER_SLOW = 0;
++    public static final int OPT_HOPPER_AUTODETECT = 1;
++    public static final int OPT_HOPPER_OPTIMIZED = 2;
++    public static final int OPT_HOPPER_NO_PLUGINS = 3;
++    public int optimizedHopperMode = OPT_HOPPER_AUTODETECT;
++    public int initialOptimizedHopperMode = OPT_HOPPER_AUTODETECT;
++    private void optimizeHopperMode() {
++        optimizedHopperMode = getInt("optimized-hopper-mode", optimizedHopperMode);
++        if (optimizedHopperMode == OPT_HOPPER_OPTIMIZED) {
++            log("Optimize Hoppers: Use Optimized Path");
++        } else if (optimizedHopperMode == OPT_HOPPER_NO_PLUGINS) {
++            log("Optimize Hoppers: Super Optimize (No Event Fire)");
++        } else if (optimizedHopperMode == OPT_HOPPER_SLOW){
++            log("Optimize Hoppers: Disabled (Hoppers will cause intense lag)");
++        } else {
++            optimizedHopperMode = OPT_HOPPER_AUTODETECT;
++            log("Optimize Hoppers: Auto detect (Tries to determine safe hopper optimizations)");
++        }
++        initialOptimizedHopperMode = optimizedHopperMode;
++    }
+ }
+diff --git a/src/main/java/net/minecraft/server/TileEntityHopper.java b/src/main/java/net/minecraft/server/TileEntityHopper.java
+index ebbe5d326..71076ecd0 100644
+--- a/src/main/java/net/minecraft/server/TileEntityHopper.java
++++ b/src/main/java/net/minecraft/server/TileEntityHopper.java
+@@ -5,6 +5,7 @@ import java.util.List;
+ import javax.annotation.Nullable;
+ 
+ // CraftBukkit start
++import com.destroystokyo.paper.PaperWorldConfig; // Paper
+ import org.bukkit.craftbukkit.entity.CraftHumanEntity;
+ import org.bukkit.craftbukkit.inventory.CraftItemStack;
+ import org.bukkit.entity.HumanEntity;
+@@ -196,6 +197,182 @@ public class TileEntityHopper extends TileEntityLootable implements IHopper, ITi
+         return false;
+     }
+ 
++    // Paper start - Optimize Hoppers
++    private static boolean pullMode2EventFired = false;
++    private static int optimizeMode = 1; // changed every hopper action
++    // Mode 3 = no event call (no event calls at all)
++    private boolean pushMode3(IInventory iinventory, EnumDirection enumdirection) {
++        for (int i = 0; i < this.getSize(); ++i) {
++            if (!this.getItem(i).isEmpty()) {
++                ItemStack itemstack = this.getItem(i);
++                final int origCount = itemstack.getCount();
++                final int moved = Math.min(world.spigotConfig.hopperAmount, origCount);
++                itemstack.setCount(moved);
++                final ItemStack itemstack1 = addItem(this, iinventory, itemstack, enumdirection);
++
++                if (itemstack1.isEmpty()) {
++                    itemstack = itemstack.cloneItemStack();
++                    itemstack.setCount(origCount - moved);
++                    this.setItem(i, itemstack);
++                    iinventory.update();
++                    return true;
++                }
++                itemstack.setCount(origCount);
++            }
++        }
++        return false;
++    }
++
++    // Mode 2 = Only 1 event fire, no cloning, no plugins use getItem/setItem
++    private boolean pushMode2(IInventory iinventory, EnumDirection enumdirection) {
++        boolean firedEvent = false;
++        for (int i = 0; i < this.getSize(); ++i) {
++            if (!this.getItem(i).isEmpty()) {
++                ItemStack itemstack = this.getItem(i);
++                final int origCount = itemstack.getCount();
++                final int moved = Math.min(world.spigotConfig.hopperAmount, origCount);
++                itemstack.setCount(moved);
++
++                // We only need to fire the event once to give protection plugins a chance to cancel this event
++                // Because nothing uses getItem, every event call should end up the same result.
++                if (!firedEvent) {
++                    Inventory destinationInventory;
++                    // Have to special case large chests as they work oddly
++                    if (iinventory instanceof InventoryLargeChest) {
++                        destinationInventory = new org.bukkit.craftbukkit.inventory.CraftInventoryDoubleChest((InventoryLargeChest) iinventory);
++                        // Paper start - avoid redundant snapshot creation of a TE
++                    } else if (iinventory instanceof TileEntity) {
++                        destinationInventory = ((TileEntity) iinventory).getOwner(false).getInventory();
++                    } else {
++                        destinationInventory = iinventory.getOwner().getInventory();
++                    }
++                    InventoryMoveItemEvent event = new InventoryMoveItemEvent(this.getOwner(false).getInventory(),
++                            // Mirror is safe as we no plugins ever use this item
++                            CraftItemStack.asCraftMirror(itemstack), destinationInventory, true);
++
++                    firedEvent = true;
++                    if (!event.callEvent()) {
++                        itemstack.setCount(origCount);
++                        this.setCooldown(world.spigotConfig.hopperTransfer); // Spigot
++                        return false;
++                    }
++                }
++                final ItemStack itemstack1 = addItem(this, iinventory, itemstack, enumdirection);
++
++                if (itemstack1.isEmpty()) {
++                    itemstack = itemstack.cloneItemStack();
++                    itemstack.setCount(origCount - moved);
++                    this.setItem(i, itemstack);
++                    iinventory.update();
++                    return true;
++                }
++                itemstack.setCount(origCount);
++            }
++        }
++        return false;
++    }
++    // Mode 3 = no event call (no event calls at all)
++    private static boolean pullMode3(IHopper ihopper, IInventory iinventory, int i) {
++        ItemStack itemstack = iinventory.getItem(i);
++        final int origCount = itemstack.getCount();
++        final World world = ihopper.getWorld();
++        final int moved = Math.min(world.spigotConfig.hopperAmount, origCount);
++        itemstack.setCount(moved);
++        final ItemStack itemstack2 = addItem(iinventory, ihopper, itemstack, null);
++        if (itemstack2.isEmpty()) {
++            itemstack = itemstack.cloneItemStack();
++            itemstack.setCount(origCount - moved);
++            IGNORE_TILE_UPDATES = true;
++            iinventory.setItem(i, itemstack);
++            IGNORE_TILE_UPDATES = false;
++            iinventory.update();
++            return true;
++        }
++        itemstack.setCount(origCount);
++        return true;
++    }
++
++    // Mode 2 = Only 1 event fire, no cloning, no plugins use getItem/setItem
++    private static boolean pullMode2(IHopper ihopper, IInventory iinventory, int i) {
++        ItemStack itemstack = iinventory.getItem(i);
++        final int origCount = itemstack.getCount();
++        final World world = ihopper.getWorld();
++        final int moved = Math.min(world.spigotConfig.hopperAmount, origCount);
++        itemstack.setCount(moved);
++
++        if (!pullMode2EventFired) {
++            pullMode2EventFired = true;
++            Inventory sourceInventory;
++            // Have to special case large chests as they work oddly
++            if (iinventory instanceof InventoryLargeChest) {
++                sourceInventory = new org.bukkit.craftbukkit.inventory.CraftInventoryDoubleChest((InventoryLargeChest) iinventory);
++                // Paper start - avoid redundant snapshot creation of a TE
++            } else if (iinventory instanceof TileEntity) {
++                sourceInventory = ((TileEntity) iinventory).getOwner(false).getInventory();
++            } else {
++                sourceInventory = iinventory.getOwner().getInventory();
++            }
++
++            Inventory destination;
++            if (ihopper instanceof TileEntity) {
++                destination = ((TileEntity) ihopper).getOwner(false).getInventory();
++            } else {
++                destination = ihopper.getOwner().getInventory();
++            }
++
++            InventoryMoveItemEvent event = new InventoryMoveItemEvent(sourceInventory,
++                    // Mirror is safe as we no plugins ever use this item
++                    CraftItemStack.asCraftMirror(itemstack), destination, false);
++            if (!event.callEvent()) {
++                itemstack.setCount(origCount);
++                if (ihopper instanceof TileEntityHopper) {
++                    ((TileEntityHopper) ihopper).setCooldown(ihopper.getWorld().spigotConfig.hopperTransfer);
++                } else if (ihopper instanceof EntityMinecartHopper) {
++                    ((EntityMinecartHopper) ihopper).setCooldown(ihopper.getWorld().spigotConfig.hopperTransfer / 2);
++                }
++                return false;
++            }
++        }
++
++        final ItemStack itemstack2 = addItem(iinventory, ihopper, itemstack, null);
++        if (itemstack2.isEmpty()) {
++            itemstack = itemstack.cloneItemStack();
++            itemstack.setCount(origCount - moved);
++            IGNORE_TILE_UPDATES = true;
++            iinventory.setItem(i, itemstack);
++            IGNORE_TILE_UPDATES = false;
++            iinventory.update();
++            return true;
++        }
++        itemstack.setCount(origCount);
++        return true;
++    }
++    private static void processAutoOptimize(World world, InventoryMoveItemEvent event) {
++        PaperWorldConfig paperConfig = world.paperConfig;
++        if (event.calledGetItem || event.calledSetItem) {
++            paperConfig.optimizedHopperMode = 0;
++            MinecraftServer.LOGGER.warn("[Paper] Optimized Hoppers detected that it was unsafe to optimize your hoppers any further. Some plugins are using the item in InventoryMoveItemEvent. Remove plugins that conditionally mess with hoppers based on the item to optimize performance.");
++        } else if (InventoryMoveItemEvent.getHandlerList().getRegisteredListeners().length == 0) {
++            MinecraftServer.LOGGER.info("[Paper] Optimized Hoppers detected that no plugin is listening to InventoryMoveItemEvent! We will use the fastest optimization possible. Woot!");
++            paperConfig.optimizedHopperMode = 3;
++        } else {
++            MinecraftServer.LOGGER.info("[Paper] Optimized Hoppers detected that no plugin is using the item in InventoryMoveItemEvent! This means we can safely use faster code for hoppers and greatly improve performance. Woot!");
++            paperConfig.optimizedHopperMode = 2;
++        }
++    }
++    private static void processHopperTick(World world) {
++        final PaperWorldConfig paperConfig = world.paperConfig;
++        if (paperConfig.optimizedHopperMode == PaperWorldConfig.OPT_HOPPER_NO_PLUGINS &&
++                paperConfig.initialOptimizedHopperMode == PaperWorldConfig.OPT_HOPPER_AUTODETECT &&
++                InventoryMoveItemEvent.getHandlerList().getRegisteredListeners().length > 0) {
++            // Reset back to auto detect, a listener was registered
++            paperConfig.optimizedHopperMode = PaperWorldConfig.OPT_HOPPER_AUTODETECT;
++        }
++        optimizeMode = paperConfig.optimizedHopperMode;
++        pullMode2EventFired = false;
++    }
++
++    // Paper end
+     private boolean s() {
+         IInventory iinventory = this.I();
+ 
+@@ -207,13 +384,27 @@ public class TileEntityHopper extends TileEntityLootable implements IHopper, ITi
+             if (this.a(iinventory, enumdirection)) {
+                 return false;
+             } else {
++                // Paper start
++                processHopperTick(world);
++                int optimizeMode = this.world.paperConfig.optimizedHopperMode;
++                if (optimizeMode == PaperWorldConfig.OPT_HOPPER_NO_PLUGINS) {
++                    return pushMode3(iinventory, enumdirection);
++                } else if (optimizeMode == PaperWorldConfig.OPT_HOPPER_OPTIMIZED) {
++                    return pushMode2(iinventory, enumdirection);
++                }
++                // Paper end
+                 for (int i = 0; i < this.getSize(); ++i) {
+                     if (!this.getItem(i).isEmpty()) {
+-                        ItemStack itemstack = this.getItem(i).cloneItemStack();
++                        // Paper start - Optimized Hoppers
++                        ItemStack itemstack = this.getItem(i); // Don't clone, just juggle counts
++                        int origCount = itemstack.getCount();
++                        int moved = Math.min(world.spigotConfig.hopperAmount, origCount);
++                        itemstack.setCount(moved);
++                        // Paper end
+                         // ItemStack itemstack1 = addItem(this, iinventory, this.splitStack(i, 1), enumdirection);
+ 
+                         // CraftBukkit start - Call event when pushing items into other inventories
+-                        CraftItemStack oitemstack = CraftItemStack.asCraftMirror(this.splitStack(i, world.spigotConfig.hopperAmount)); // Spigot
++                        //CraftItemStack oitemstack = CraftItemStack.asCraftMirror(this.splitStack(i, world.spigotConfig.hopperAmount)); // Spigot // Paper
+ 
+                         Inventory destinationInventory;
+                         // Have to special case large chests as they work oddly
+@@ -226,31 +417,39 @@ public class TileEntityHopper extends TileEntityLootable implements IHopper, ITi
+                             destinationInventory = iinventory.getOwner().getInventory();
+                         }
+ 
+-                        InventoryMoveItemEvent event = new InventoryMoveItemEvent(this.getOwner(false).getInventory(), oitemstack.clone(), destinationInventory, true);
++                        InventoryMoveItemEvent event = new InventoryMoveItemEvent(this.getOwner(false).getInventory(), CraftItemStack.asBukkitCopy(itemstack), destinationInventory, true); // Paper use bukkit copy
+                         // Paper end - avoid redundant snapshot creation of a TE
+                         this.getWorld().getServer().getPluginManager().callEvent(event);
+                         if (event.isCancelled()) {
+-                            this.setItem(i, itemstack);
++                            itemstack.setCount(origCount); //this.setItem(i, itemstack); // Paper - just restore the count
+                             this.setCooldown(world.spigotConfig.hopperTransfer); // Spigot
+                             return false;
+                         }
+                         // Paper start
+-                        org.bukkit.inventory.ItemStack eventStack = event.getItem();
+-                        int origCount = eventStack.getAmount(); // Spigot
+-                        ItemStack itemstack1 = addItem(this, iinventory, CraftItemStack.asNMSCopy(eventStack), enumdirection);
+-                        // Paper end
++                        if (optimizeMode == PaperWorldConfig.OPT_HOPPER_AUTODETECT) processAutoOptimize(world, event); // Must be BEFORE the event.getItem() below this
++                        // Paper - only copy if item was changed
++                        ItemStack itemstack1;
++                        if (event.calledSetItem) {
++                            itemstack1 = addItem(this, iinventory, CraftItemStack.asNMSCopy(event.getItem()), enumdirection);
++                        } else {
++                            itemstack1 = addItem(this, iinventory, itemstack, enumdirection);
++                        }
++
+                         if (itemstack1.isEmpty()) {
+-                            if (eventStack.equals(oitemstack)) { // Paper
+-                                iinventory.update();
+-                            } else {
+-                                this.setItem(i, itemstack);
+-                            }
++                            // we actually moved an item, so NOW clone and set source item to new count
++                            itemstack = itemstack.cloneItemStack();
++                            itemstack.setCount(origCount - moved);
++                            this.setItem(i, itemstack);
++                            iinventory.update();
+                             // CraftBukkit end
+                             return true;
+                         }
+ 
+-                        itemstack.subtract(origCount - itemstack1.getCount()); // Spigot
+-                        this.setItem(i, itemstack);
++                        //itemstack.subtract(origCount - itemstack1.getCount()); // Spigot
++                        //this.setItem(i, itemstack);
++                        // No item was moved, reset back to orig count for source
++                        itemstack.setCount(origCount);
++                        // Paper end
+                     }
+                 }
+ 
+@@ -332,6 +531,7 @@ public class TileEntityHopper extends TileEntityLootable implements IHopper, ITi
+             if (b(iinventory, enumdirection)) {
+                 return false;
+             }
++            processHopperTick(ihopper.getWorld()); // Paper - Optimized Hoppers
+ 
+             if (iinventory instanceof IWorldInventory) {
+                 IWorldInventory iworldinventory = (IWorldInventory) iinventory;
+@@ -374,10 +574,21 @@ public class TileEntityHopper extends TileEntityLootable implements IHopper, ITi
+         ItemStack itemstack = iinventory.getItem(i);
+ 
+         if (!itemstack.isEmpty() && b(iinventory, itemstack, i, enumdirection)) {
+-            ItemStack itemstack1 = itemstack.cloneItemStack();
++            // Paper start
++            if (optimizeMode == PaperWorldConfig.OPT_HOPPER_OPTIMIZED) {
++                return pullMode2(ihopper, iinventory, i);
++            } else if (optimizeMode == PaperWorldConfig.OPT_HOPPER_NO_PLUGINS) {
++                return pullMode3(ihopper, iinventory, i);
++            }
++
++            //ItemStack itemstack1 = itemstack; // Don't clone, just juggle counts
++            int origCount = itemstack.getCount();
++            int moved = Math.min(ihopper.getWorld().spigotConfig.hopperAmount, origCount);
++            itemstack.setCount(moved);
++            // Paper end
+             // ItemStack itemstack2 = addItem(iinventory, ihopper, iinventory.splitStack(i, 1), (EnumDirection) null);
+             // CraftBukkit start - Call event on collection of items from inventories into the hopper
+-            CraftItemStack oitemstack = CraftItemStack.asCraftMirror(iinventory.splitStack(i, ihopper.getWorld().spigotConfig.hopperAmount)); // Spigot
++            //CraftItemStack oitemstack = CraftItemStack.asCraftMirror(iinventory.splitStack(i, ihopper.getWorld().spigotConfig.hopperAmount)); // Spigot // Paper
+ 
+             Inventory sourceInventory;
+             // Have to special case large chests as they work oddly
+@@ -397,11 +608,11 @@ public class TileEntityHopper extends TileEntityLootable implements IHopper, ITi
+                 destination = ihopper.getOwner().getInventory();
+             }
+ 
+-            InventoryMoveItemEvent event = new InventoryMoveItemEvent(sourceInventory, oitemstack.clone(), destination, false);
++            InventoryMoveItemEvent event = new InventoryMoveItemEvent(sourceInventory, CraftItemStack.asBukkitCopy(itemstack), destination, false); // Paper - use bukkit copy
+             // Paper end - avoid redundant snapshot creation of a TE
+             ihopper.getWorld().getServer().getPluginManager().callEvent(event);
+             if (event.isCancelled()) {
+-                iinventory.setItem(i, itemstack1);
++                itemstack.setCount(origCount); //this.setItem(i, itemstack); // Paper - just restore the count
+ 
+                 if (ihopper instanceof TileEntityHopper) {
+                     ((TileEntityHopper) ihopper).setCooldown(ihopper.getWorld().spigotConfig.hopperTransfer); // Spigot
+@@ -411,22 +622,31 @@ public class TileEntityHopper extends TileEntityLootable implements IHopper, ITi
+                 return false;
+             }
+             // Paper start
+-            org.bukkit.inventory.ItemStack eventStack = event.getItem();
+-            int origCount = eventStack.getAmount(); // Spigot
+-            ItemStack itemstack2 = addItem(iinventory, ihopper, CraftItemStack.asNMSCopy(eventStack), null);
+-            // Paper end
++            if (optimizeMode == PaperWorldConfig.OPT_HOPPER_AUTODETECT) processAutoOptimize(ihopper.getWorld(), event); // Must be BEFORE the event.getItem() below this
++            ItemStack itemstack2;
++            // Paper - only copy if item was changed
++            if (event.calledSetItem) {
++                itemstack2 = addItem(iinventory, ihopper, CraftItemStack.asNMSCopy(event.getItem()), null);
++            } else {
++                itemstack2 = addItem(iinventory, ihopper, itemstack, null);
++            }
+             if (itemstack2.isEmpty()) {
+-                if (eventStack.equals(oitemstack)) { // Paper
+-                    iinventory.update();
+-                } else {
+-                    iinventory.setItem(i, itemstack1);
+-                }
++                // we actually moved an item, so NOW clone and set source item to new count
++                itemstack = itemstack.cloneItemStack();
++                itemstack.setCount(origCount - moved);
++                IGNORE_TILE_UPDATES = true;
++                iinventory.setItem(i, itemstack);
++                IGNORE_TILE_UPDATES = false;
++                iinventory.update();
+                 // CraftBukkit end
+                 return true;
+             }
+ 
+-            itemstack1.subtract(origCount - itemstack2.getCount()); // Spigot
+-            iinventory.setItem(i, itemstack1);
++            //itemstack1.subtract(origCount - itemstack2.getCount()); // Spigot
++            //iinventory.setItem(i, itemstack1);
++            // No item was moved, reset back to orig count for source
++            itemstack.setCount(origCount);
++            // Paper stop
+         }
+ 
+         return false;
+-- 
+2.15.1
+
